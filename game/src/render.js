@@ -1,10 +1,11 @@
-// Skyline Run — everything the player sees.
+// Skyline Run — everything the player sees (v2 visuals).
 // A chase view: the camera sits behind and above the jet, looking along
-// its heading. Terrain is a projected heightfield drawn back to front,
-// the jet is drawn in frame, and the HUD carries altitude, speed,
-// heading, fuel, throttle, score and the next ring.
+// its heading. Layered ridge silhouettes and haze give the terrain depth,
+// the jet is a detailed focal point low-centre, and the HUD is one
+// consistent aviation panel set: ALT / SPD / HDG, score, rings, throttle
+// and fuel gauges, and an attitude indicator.
 import { CFG, RINGS, RUNWAY } from './config.js';
-import { terrainHeight, terrainColor } from './world.js';
+import { terrainHeight, terrainColor, dapple } from './world.js';
 
 const FOCAL = 620; // px, perspective strength
 
@@ -26,29 +27,129 @@ function project(px, py, pz, cam, w, h) {
   return { x: w / 2 + rx * s, y: h * 0.42 - ry2 * s, d: rz2 };
 }
 
-function drawSky(ctx, w, h, pitch, roll) {
+// --- colour helpers -------------------------------------------------------
+function hexRgb(hex) {
+  return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
+}
+function mixRgb(a, b, t) {
+  return `rgb(${Math.round(a[0] + (b[0] - a[0]) * t)},${Math.round(a[1] + (b[1] - a[1]) * t)},${Math.round(a[2] + (b[2] - a[2]) * t)})`;
+}
+function shadeHex(hex, f) {
+  const c = hexRgb(hex);
+  return `rgb(${Math.min(255, Math.round(c[0] * f))},${Math.min(255, Math.round(c[1] * f))},${Math.min(255, Math.round(c[2] * f))})`;
+}
+const HAZE = [198, 216, 226]; // atmospheric haze toward the horizon
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// --- sky ------------------------------------------------------------------
+// Deterministic puffy clouds: each is a cluster of shaded ellipses.
+const CLOUDS = [
+  { u: 0.06, v: 0.10, s: 1.15, a: 0.92 }, { u: 0.30, v: 0.07, s: 0.85, a: 0.85 },
+  { u: 0.52, v: 0.13, s: 1.35, a: 0.95 }, { u: 0.74, v: 0.08, s: 0.95, a: 0.88 },
+  { u: 0.90, v: 0.16, s: 1.05, a: 0.90 }, { u: 0.18, v: 0.20, s: 0.70, a: 0.75 },
+  { u: 0.44, v: 0.22, s: 0.80, a: 0.78 }, { u: 0.66, v: 0.24, s: 0.60, a: 0.70 },
+  { u: 0.84, v: 0.30, s: 0.75, a: 0.72 },
+];
+
+function drawCloud(ctx, cx, cy, s, alpha) {
+  // A puff: shaded base with bright tops, so clouds read as volumes.
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const puffs = [
+    [0, 6, 46, 15], [-38, 10, 32, 12], [38, 10, 34, 12], [-16, -6, 30, 13], [18, -4, 28, 12],
+  ];
+  for (const [ox, oy, rx, ry] of puffs) {
+    const g = ctx.createLinearGradient(cx + ox * s, cy + (oy - ry) * s, cx + ox * s, cy + (oy + ry) * s);
+    g.addColorStop(0, '#ffffff');
+    g.addColorStop(1, '#d7e2ea');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.ellipse(cx + ox * s, cy + oy * s, rx * s, ry * s, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSky(ctx, w, h, pitch, roll, horizonY) {
+  // Deeper sky: rich zenith blue fading to pale warm haze at the horizon.
   const g = ctx.createLinearGradient(0, 0, 0, h);
-  g.addColorStop(0, '#2f6db3');
-  g.addColorStop(0.45, '#7fb2dd');
-  g.addColorStop(0.62, '#cfe4ef');
-  g.addColorStop(1, '#e8e2c8');
+  g.addColorStop(0, '#1c5ca6');
+  g.addColorStop(0.35, '#5d9bd3');
+  g.addColorStop(0.55, '#a8c8e2');
+  g.addColorStop(0.68, '#dbe7e6');
+  g.addColorStop(1, '#f0e6c6');
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, w, h);
-  // Sun.
-  const sunX = w * 0.78, sunY = h * 0.16 - pitch * 120;
-  const sg = ctx.createRadialGradient(sunX, sunY, 4, sunX, sunY, 70);
-  sg.addColorStop(0, 'rgba(255,244,200,0.95)');
-  sg.addColorStop(0.3, 'rgba(255,226,140,0.55)');
-  sg.addColorStop(1, 'rgba(255,226,140,0)');
+  // Sun: soft layered glow, no hard disc edge.
+  const sunX = w * 0.78, sunY = h * 0.13 - pitch * 140;
+  const sg = ctx.createRadialGradient(sunX, sunY, 2, sunX, sunY, 190);
+  sg.addColorStop(0, 'rgba(255,250,220,0.98)');
+  sg.addColorStop(0.12, 'rgba(255,240,190,0.75)');
+  sg.addColorStop(0.4, 'rgba(255,222,130,0.28)');
+  sg.addColorStop(1, 'rgba(255,222,130,0)');
   ctx.fillStyle = sg;
-  ctx.fillRect(sunX - 70, sunY - 70, 140, 140);
-  // Drifting clouds.
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  for (let i = 0; i < 7; i++) {
-    const cx = ((i * 397 + 120) % 1400) / 1400 * w - roll * 30;
-    const cy = h * (0.10 + (i % 3) * 0.07) - pitch * 200;
+  ctx.fillRect(sunX - 190, sunY - 190, 380, 380);
+  ctx.fillStyle = '#fffbe8';
+  ctx.beginPath(); ctx.arc(sunX, sunY, 17, 0, Math.PI * 2); ctx.fill();
+  // High wispy cirrus.
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 3;
+  for (let i = 0; i < 3; i++) {
+    const cy = h * (0.05 + i * 0.03) - pitch * 160;
     ctx.beginPath();
-    ctx.ellipse(cx, cy, 70 + (i % 3) * 25, 16 + (i % 2) * 7, 0, 0, Math.PI * 2);
+    ctx.moveTo(w * (0.08 + i * 0.2), cy);
+    ctx.bezierCurveTo(w * (0.3 + i * 0.15), cy - 8, w * (0.55 + i * 0.1), cy + 6, w * (0.85 - i * 0.1), cy - 4);
+    ctx.stroke();
+  }
+  // Puffy clouds, drifting gently with roll.
+  for (const c of CLOUDS) {
+    const cx = c.u * w - roll * 36 + Math.sin(c.u * 40) * 12;
+    const cy = c.v * h - pitch * 220;
+    if (cy < -40 || cy > horizonY + 40) continue;
+    drawCloud(ctx, cx, cy, c.s, c.a);
+  }
+  // Warm haze band hugging the horizon.
+  const hg = ctx.createLinearGradient(0, horizonY - 70, 0, horizonY + 30);
+  hg.addColorStop(0, 'rgba(232,238,230,0)');
+  hg.addColorStop(0.6, 'rgba(232,238,230,0.45)');
+  hg.addColorStop(1, 'rgba(232,238,230,0)');
+  ctx.fillStyle = hg;
+  ctx.fillRect(0, horizonY - 70, w, 100);
+}
+
+// Distant mountain silhouettes, layered in cool blue-gray, sampled from
+// the same heightfield the terrain uses so they agree with the ground.
+function drawRidges(ctx, cam, w, h, horizonY) {
+  const layers = [
+    { d: 4200, color: 'rgba(143,168,192,0.50)' },
+    { d: 2700, color: 'rgba(111,138,165,0.62)' },
+  ];
+  for (const { d, color } of layers) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(-10, horizonY + 2);
+    let first = true;
+    for (let a = -0.95; a <= 0.95; a += 0.05) {
+      const ang = cam.heading + a;
+      const wx = cam.x + Math.sin(ang) * d;
+      const wz = cam.z - Math.cos(ang) * d;
+      const wy = terrainHeight(wx, wz);
+      const p = project(wx, wy, wz, cam, w, h);
+      const y = p ? Math.min(p.y, horizonY + 2) : horizonY + 2;
+      const x = p ? p.x : (w / 2 + a * w);
+      if (first) { ctx.lineTo(x, y); first = false; } else ctx.lineTo(x, y);
+    }
+    ctx.lineTo(w + 10, horizonY + 2);
+    ctx.closePath();
     ctx.fill();
   }
 }
@@ -59,14 +160,14 @@ function drawTerrain(ctx, cam, w, h) {
   const sin = Math.sin(cam.heading), cos = Math.cos(cam.heading);
   for (let r = rows - 1; r >= 0; r--) {
     const zc = 20 + r * step;
+    // Atmospheric haze grows with distance: far ground melts into the sky.
+    const hazeT = Math.min(0.55, Math.max(0, (zc - 250) / 1500));
     for (let c = 0; c < cols; c++) {
       const xc = (c - cols / 2) * step;
-      // Four corners of this quad, in world space.
       const pts = [];
       let ok = true;
       for (const [ox, oz] of [[0, 0], [step, 0], [step, step], [0, step]]) {
         const lx = xc + ox, lz = zc + oz;
-        // Local +z is forward: world = cam + right*lx + forward*lz.
         const wx = cam.x + lx * cos + lz * sin;
         const wz = cam.z + lx * sin - lz * cos;
         const wy = terrainHeight(wx, wz);
@@ -80,14 +181,19 @@ function drawTerrain(ctx, cam, w, h) {
       const mh = terrainHeight(mx, mz);
       const inRunway = Math.abs(mx - RUNWAY.x) < RUNWAY.width / 2
         && mz > RUNWAY.z0 && mz < RUNWAY.z1;
-      ctx.fillStyle = inRunway ? '#3a3f45' : terrainColor(mx, mz, mh);
+      if (inRunway) {
+        ctx.fillStyle = mixRgb(hexRgb('#3a3f45'), HAZE, hazeT);
+      } else {
+        const base = shadeHex(terrainColor(mx, mz, mh), dapple(mx, mz));
+        const rgb = base.slice(4, -1).split(',').map(Number);
+        ctx.fillStyle = mixRgb(rgb, HAZE, hazeT);
+      }
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let i = 1; i < 4; i++) ctx.lineTo(pts[i].x, pts[i].y);
       ctx.closePath();
       ctx.fill();
       if (inRunway) {
-        // Runway centre line.
         ctx.strokeStyle = 'rgba(255,255,255,0.75)';
         ctx.lineWidth = 1.5;
         ctx.beginPath();
@@ -96,6 +202,20 @@ function drawTerrain(ctx, cam, w, h) {
         ctx.stroke();
       }
     }
+  }
+  // Soft cloud shadows drifting over the ground.
+  for (const c of CLOUDS.slice(0, 4)) {
+    const cx = c.u * w + 90;
+    const cy = h * (0.62 + (c.v * 0.5));
+    const g = ctx.createRadialGradient(cx, cy, 10, cx, cy, 150 * c.s);
+    g.addColorStop(0, 'rgba(26,47,69,0.10)');
+    g.addColorStop(1, 'rgba(26,47,69,0)');
+    ctx.fillStyle = g;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(1.6, 0.55);
+    ctx.beginPath(); ctx.arc(0, 0, 150 * c.s, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -114,7 +234,7 @@ function drawRunway(ctx, cam, w, h) {
   for (let i = ptsR.length - 1; i >= 0; i--) ctx.lineTo(ptsR[i].x, ptsR[i].y);
   ctx.closePath();
   ctx.fill();
-  // Dashed centre line.
+  // Threshold bars and dashed centre line.
   ctx.strokeStyle = 'rgba(255,255,255,0.8)';
   ctx.lineWidth = 2;
   ctx.setLineDash([14, 18]);
@@ -128,170 +248,365 @@ function drawRunway(ctx, cam, w, h) {
   ctx.setLineDash([]);
 }
 
-function drawRing(ctx, ring, cam, w, h, next, showLabel) {
+function drawRing(ctx, ring, cam, w, h, next, showLabel, dist, index) {
   const [rx, ry, rz] = ring;
   const n = 28;
   const pts = [];
   for (let i = 0; i <= n; i++) {
     const a = (i / n) * Math.PI * 2;
-    // Ring faces along the course (roughly towards the camera's heading).
     const px = rx + Math.cos(a) * CFG.ringRadius;
     const py = ry + Math.sin(a) * CFG.ringRadius;
     pts.push(project(px, py, rz, cam, w, h));
   }
   if (pts.some((p) => !p)) return;
+  const centre = project(rx, ry, rz, cam, w, h);
+  // Faint dotted guide from the flight-path marker toward the next ring.
+  if (next && centre) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.40)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([3, 10]);
+    ctx.beginPath();
+    ctx.moveTo(w / 2, h * 0.42);
+    ctx.lineTo(centre.x, centre.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Dimensional ring: soft outer glow, bright sunlit top half, shaded
+  // lower half, and a thin inner highlight so it reads as a solid target.
+  ctx.lineJoin = 'round';
+  const trace = (a0, a1) => {
+    ctx.beginPath();
+    for (let i = 0; i <= 24; i++) {
+      const a = a0 + (a1 - a0) * (i / 24);
+      const px = rx + Math.cos(a) * CFG.ringRadius;
+      const py = ry + Math.sin(a) * CFG.ringRadius;
+      const p = project(px, py, rz, cam, w, h);
+      if (!p) return;
+      if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+  };
+  ctx.strokeStyle = next ? 'rgba(255,180,0,0.28)' : 'rgba(255,180,0,0.16)';
+  ctx.lineWidth = next ? 14 : 9;
+  trace(0, Math.PI * 2);
+  ctx.strokeStyle = next ? '#ffd34d' : 'rgba(255,211,77,0.55)';
   ctx.lineWidth = next ? 7 : 4;
-  ctx.strokeStyle = next ? '#ffb400' : 'rgba(255,180,0,0.45)';
-  ctx.beginPath();
-  ctx.moveTo(pts[0].x, pts[0].y);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-  ctx.stroke();
-  ctx.fillStyle = next ? '#fff3c4' : 'rgba(255,243,196,0.5)';
-  ctx.font = 'bold 15px sans-serif';
-  ctx.textAlign = 'center';
-  // Label at the top of the ring (angle +90 deg is the top point).
-  const top = pts[Math.floor(n / 4)];
-  if (next && showLabel && top.x > 40 && top.x < w - 40 && top.y > 90) {
+  trace(Math.PI, Math.PI * 2); // upper half, sunlit
+  ctx.strokeStyle = next ? '#e08a00' : 'rgba(224,138,0,0.55)';
+  trace(0, Math.PI); // lower half, shaded
+  ctx.strokeStyle = next ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1.5;
+  trace(Math.PI * 1.05, Math.PI * 1.95);
+  // Label and distance above the next ring.
+  if (next && showLabel && centre && centre.x > 60 && centre.x < w - 60 && centre.y > 110) {
+    ctx.textAlign = 'center';
     ctx.font = 'bold 16px sans-serif';
     ctx.lineWidth = 4;
     ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-    ctx.strokeText('NEXT RING', top.x, top.y - 12);
+    ctx.strokeText('NEXT RING', centre.x, centre.y - 46);
     ctx.fillStyle = '#3d2b00';
-    ctx.fillText('NEXT RING', top.x, top.y - 12);
+    ctx.fillText('NEXT RING', centre.x, centre.y - 46);
+    ctx.font = 'bold 13px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = 'rgba(20,30,40,0.7)';
+    ctx.lineWidth = 3;
+    const label = `RING ${index + 1} · ${Math.max(0, Math.round(dist))}m`;
+    ctx.strokeText(label, centre.x, centre.y - 26);
+    ctx.fillText(label, centre.x, centre.y - 26);
+    ctx.textAlign = 'left';
   }
 }
 
-function drawJet(ctx, w, h, roll, speed) {
-  // Chase view: the jet sits low-centre, banking with the roll.
-  const cx = w / 2, cy = h * 0.68;
+function drawJet(ctx, w, h, roll, speed, time) {
+  // Chase view: a larger, detailed jet low-centre, banking with the roll,
+  // with contrails streaming off the wingtips.
+  const cx = w / 2 - roll * 26, cy = h * 0.70;
+  const s = Math.min(w, h) / 520;
+  // Contrails: tapered, fading trails behind the wingtips.
   ctx.save();
   ctx.translate(cx, cy);
-  ctx.rotate(roll * 0.9);
-  const s = Math.min(w, h) / 620;
+  ctx.rotate(roll * 1.0);
   ctx.scale(s, s);
+  const trail = Math.min(1, speed / CFG.maxSpeed);
+  for (const side of [-1, 1]) {
+    const wx = side * 138, wy = 44;
+    for (let k = 0; k < 4; k++) {
+      const t = k / 4;
+      const len = 64 * trail * (1 - t * 0.25);
+      const wob = Math.sin(time * 2 + k * 1.3 + side) * 3 * t;
+      const out = side * 10 * t; // trails drift slightly outward
+      ctx.strokeStyle = `rgba(255,255,255,${0.22 * (1 - t) * trail})`;
+      ctx.lineWidth = 6 - t * 4.5;
+      ctx.beginPath();
+      ctx.moveTo(wx, wy + t * len * 0.3);
+      ctx.quadraticCurveTo(wx + wob, wy + len * (0.5 + t * 0.3), wx + out + wob * 2, wy + len);
+      ctx.stroke();
+    }
+  }
   // Engine glow grows with speed.
   const glow = 0.4 + (speed / CFG.maxSpeed) * 0.6;
-  ctx.fillStyle = `rgba(255,170,60,${0.35 * glow})`;
-  ctx.beginPath();
-  ctx.ellipse(0, 46, 16, 10 + 18 * glow, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // Wings.
-  ctx.fillStyle = '#c8ccd2';
-  ctx.beginPath();
-  ctx.moveTo(-14, 6); ctx.lineTo(-150, 34); ctx.lineTo(-138, 52); ctx.lineTo(-10, 26);
-  ctx.closePath(); ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(14, 6); ctx.lineTo(150, 34); ctx.lineTo(138, 52); ctx.lineTo(10, 26);
-  ctx.closePath(); ctx.fill();
-  // Tail.
+  const eg = ctx.createRadialGradient(0, 52, 2, 0, 52, 26);
+  eg.addColorStop(0, `rgba(255,200,110,${0.8 * glow})`);
+  eg.addColorStop(0.5, `rgba(255,150,50,${0.35 * glow})`);
+  eg.addColorStop(1, 'rgba(255,150,50,0)');
+  ctx.fillStyle = eg;
+  ctx.beginPath(); ctx.ellipse(0, 52, 18, 14 + 20 * glow, 0, 0, Math.PI * 2); ctx.fill();
+  // Wings: shaded upper surfaces with dark trailing edges.
+  for (const side of [-1, 1]) {
+    const wg = ctx.createLinearGradient(0, 0, 0, 56);
+    wg.addColorStop(0, '#e6e9ed');
+    wg.addColorStop(1, '#a9aeb6');
+    ctx.fillStyle = wg;
+    ctx.beginPath();
+    ctx.moveTo(side * 14, 6);
+    ctx.lineTo(side * 152, 34);
+    ctx.lineTo(side * 140, 54);
+    ctx.lineTo(side * 10, 26);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#7c828b';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(side * 14, 8); ctx.lineTo(side * 150, 36);
+    ctx.stroke();
+    // Roundel on the wing.
+    ctx.fillStyle = '#2f6db3';
+    ctx.beginPath(); ctx.arc(side * 96, 30, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(side * 96, 30, 3.5, 0, Math.PI * 2); ctx.fill();
+    // Wingtip navigation light: red port, green starboard.
+    ctx.fillStyle = side < 0 ? '#ff3b30' : '#2ee66b';
+    ctx.beginPath(); ctx.arc(side * 148, 42, 4, 0, Math.PI * 2); ctx.fill();
+  }
+  // Tailplanes and fin.
   ctx.fillStyle = '#9aa0a8';
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    ctx.moveTo(side * 8, 34); ctx.lineTo(side * 52, 66); ctx.lineTo(side * 40, 70); ctx.lineTo(side * 6, 44);
+    ctx.closePath(); ctx.fill();
+  }
+  const fin = ctx.createLinearGradient(0, 26, 0, 66);
+  fin.addColorStop(0, '#d8433a'); fin.addColorStop(1, '#8f1f18');
+  ctx.fillStyle = fin;
   ctx.beginPath();
-  ctx.moveTo(-8, 34); ctx.lineTo(-52, 66); ctx.lineTo(-40, 70); ctx.lineTo(-6, 44);
+  ctx.moveTo(0, 22); ctx.lineTo(-10, 64); ctx.lineTo(10, 64);
   ctx.closePath(); ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(8, 34); ctx.lineTo(52, 66); ctx.lineTo(40, 70); ctx.lineTo(6, 44);
-  ctx.closePath(); ctx.fill();
-  ctx.fillStyle = '#d8433a';
-  ctx.beginPath();
-  ctx.moveTo(0, 26); ctx.lineTo(-9, 62); ctx.lineTo(9, 62);
-  ctx.closePath(); ctx.fill();
-  // Fuselage.
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('7', 0, 52);
+  // Fuselage: shaded metal with a darker spine and panel lines.
   const fg = ctx.createLinearGradient(-12, 0, 12, 0);
-  fg.addColorStop(0, '#8f959c'); fg.addColorStop(0.5, '#e8ebee'); fg.addColorStop(1, '#8f959c');
+  fg.addColorStop(0, '#7e848c'); fg.addColorStop(0.35, '#e8ebee'); fg.addColorStop(0.65, '#c9ced4'); fg.addColorStop(1, '#7e848c');
   ctx.fillStyle = fg;
   ctx.beginPath();
-  ctx.moveTo(0, -78);
+  ctx.moveTo(0, -82);
   ctx.quadraticCurveTo(13, -30, 11, 30);
-  ctx.quadraticCurveTo(10, 52, 0, 56);
-  ctx.quadraticCurveTo(-10, 52, -11, 30);
-  ctx.quadraticCurveTo(-13, -30, 0, -78);
+  ctx.quadraticCurveTo(10, 54, 0, 58);
+  ctx.quadraticCurveTo(-10, 54, -11, 30);
+  ctx.quadraticCurveTo(-13, -30, 0, -82);
   ctx.fill();
-  // Canopy.
-  ctx.fillStyle = '#274b6d';
+  ctx.strokeStyle = 'rgba(90,96,104,0.55)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(-9, -10); ctx.lineTo(9, -10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-10, 14); ctx.lineTo(10, 14); ctx.stroke();
+  // Nose cone.
+  ctx.fillStyle = '#5d646d';
   ctx.beginPath();
-  ctx.ellipse(0, -38, 7, 20, 0, 0, Math.PI * 2);
+  ctx.moveTo(0, -82);
+  ctx.quadraticCurveTo(7, -64, 6, -52);
+  ctx.quadraticCurveTo(0, -48, -6, -52);
+  ctx.quadraticCurveTo(-7, -64, 0, -82);
   ctx.fill();
-  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  // Canopy with frame and glint.
+  ctx.fillStyle = '#1d3a56';
   ctx.beginPath();
-  ctx.ellipse(-2, -46, 3, 8, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, -38, 7.5, 21, 0, 0, Math.PI * 2);
   ctx.fill();
-  // Roundel.
+  ctx.strokeStyle = '#c9ced4';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.ellipse(0, -38, 7.5, 21, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.beginPath();
+  ctx.ellipse(-2.5, -47, 3, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Fuselage roundel.
   ctx.fillStyle = '#2f6db3';
-  ctx.beginPath(); ctx.arc(0, 6, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, 8, 8, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#fff';
-  ctx.beginPath(); ctx.arc(0, 6, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, 8, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#d8433a';
+  ctx.beginPath(); ctx.arc(0, 8, 1.8, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 
-function bar(ctx, x, y, w, h, frac, color, label) {
-  ctx.fillStyle = 'rgba(10,16,24,0.55)';
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = color;
-  ctx.fillRect(x + 2, y + 2, (w - 4) * Math.max(0, Math.min(1, frac)), h - 4);
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 12px sans-serif';
+// --- HUD: one consistent aviation panel set -------------------------------
+function panel(ctx, x, y, w, h) {
+  ctx.fillStyle = 'rgba(6,12,20,0.62)';
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, h, 8);
+  ctx.stroke();
+}
+
+function gauge(ctx, x, y, w, frac, color, label, value) {
+  ctx.fillStyle = '#cfe4ef';
+  ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'left';
-  ctx.fillText(label, x + 6, y + h / 2 + 4);
+  ctx.fillText(label, x, y - 6);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(value, x + w, y - 6);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(255,255,255,0.14)';
+  roundRect(ctx, x, y, w, 10, 5);
+  ctx.fill();
+  ctx.fillStyle = color;
+  const fw = Math.max(10, (w - 2) * Math.max(0, Math.min(1, frac)));
+  roundRect(ctx, x + 1, y + 1, fw, 8, 4);
+  ctx.fill();
 }
 
 function drawHUD(ctx, f, w, h) {
-  ctx.textAlign = 'left';
-  // Top instrument strip.
-  ctx.fillStyle = 'rgba(8,14,22,0.62)';
-  ctx.fillRect(0, 0, w, 64);
-  ctx.fillStyle = '#fff';
-  ctx.font = 'bold 26px monospace';
   const alt = Math.max(0, Math.round(f.y));
   const spd = Math.round(f.speed * 3.6);
   const hdg = ((Math.round(-f.heading * 180 / Math.PI) % 360) + 360) % 360;
-  ctx.fillText(`ALT ${alt}m`, 18, 40);
-  ctx.fillText(`SPD ${spd}km/h`, 230, 40);
-  ctx.fillText(`HDG ${String(hdg).padStart(3, '0')}°`, 470, 40);
-  ctx.font = 'bold 18px monospace';
-  ctx.fillStyle = '#ffd34d';
-  ctx.fillText(`SCORE ${f.score}`, 700, 38);
-  ctx.fillStyle = '#9fe870';
-  ctx.fillText(`RINGS ${f.rings}`, 880, 38);
-  // Compass tape.
-  ctx.fillStyle = '#cfe4ef';
-  ctx.font = '13px monospace';
-  ctx.textAlign = 'center';
-  for (let d = -60; d <= 60; d += 15) {
-    const a = ((hdg + d) % 360 + 360) % 360;
-    const x = w / 2 + d * 4;
-    ctx.fillText(a % 45 === 0 ? ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(a / 45) % 8] : String(a), x, 82);
+  // Top instrument strip: aligned ALT / SPD / HDG groups, score on the right.
+  ctx.fillStyle = 'rgba(6,12,20,0.66)';
+  ctx.fillRect(0, 0, w, 64);
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, 64.5); ctx.lineTo(w, 64.5); ctx.stroke();
+  const groups = [
+    { label: 'ALTITUDE', value: `${alt}`, unit: 'M', x: 24 },
+    { label: 'AIRSPEED', value: `${spd}`, unit: 'KM/H', x: 300 },
+    { label: 'HEADING', value: String(hdg).padStart(3, '0'), unit: '°', x: 576 },
+  ];
+  ctx.textAlign = 'left';
+  for (const g of groups) {
+    ctx.fillStyle = '#8fb4cc';
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText(g.label, g.x, 20);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 30px monospace';
+    ctx.fillText(g.value, g.x, 50);
+    const vw = ctx.measureText(g.value).width;
+    ctx.fillStyle = '#8fb4cc';
+    ctx.font = 'bold 12px monospace';
+    ctx.fillText(g.unit, g.x + vw + 8, 50);
   }
-  // Artificial horizon, bottom right.
-  const hx = w - 90, hy = h - 90, hr = 52;
+  // Dividers between groups.
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  for (const x of [268, 544]) {
+    ctx.beginPath(); ctx.moveTo(x, 12); ctx.lineTo(x, 52); ctx.stroke();
+  }
+  // Score and rings, right side of the strip.
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#8fb4cc';
+  ctx.font = 'bold 11px monospace';
+  ctx.fillText('SCORE', w - 200, 20);
+  ctx.fillText('RINGS', w - 24, 20);
+  ctx.fillStyle = '#ffd34d';
+  ctx.font = 'bold 30px monospace';
+  ctx.fillText(`${f.score}`, w - 200, 50);
+  ctx.fillStyle = '#9fe870';
+  ctx.fillText(`${f.rings} / 8`, w - 24, 50);
+  ctx.textAlign = 'left';
+  // Compass tape under the strip.
+  ctx.fillStyle = 'rgba(6,12,20,0.45)';
+  ctx.fillRect(0, 64, w, 26);
+  ctx.fillStyle = '#cfe4ef';
+  ctx.font = '12px monospace';
+  ctx.textAlign = 'center';
+  const names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  for (let d = -75; d <= 75; d += 15) {
+    const a = ((hdg + d) % 360 + 360) % 360;
+    const x = w / 2 + d * 4.4;
+    const major = a % 45 === 0;
+    ctx.fillStyle = major ? '#fff' : '#9db8c9';
+    ctx.font = major ? 'bold 13px monospace' : '12px monospace';
+    ctx.fillText(major ? names[Math.round(a / 45) % 8] : String(a), x, 82);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(x, 66, 1, major ? 6 : 3);
+  }
+  // Centre caret on the tape.
+  ctx.fillStyle = '#ffd34d';
+  ctx.beginPath();
+  ctx.moveTo(w / 2 - 6, 90); ctx.lineTo(w / 2 + 6, 90); ctx.lineTo(w / 2, 97);
+  ctx.closePath(); ctx.fill();
+  ctx.textAlign = 'left';
+  // Throttle and fuel gauges, bottom left, in one panel.
+  panel(ctx, 16, h - 122, 216, 106);
+  gauge(ctx, 28, h - 100, 192, f.throttle, '#ff9d2e', 'THR', `${Math.round(f.throttle * 100)}%`);
+  gauge(ctx, 28, h - 58, 192, f.fuel / CFG.fuelMax, f.fuel < 25 ? '#e5484d' : '#4caf50', 'FUEL', `${Math.round(f.fuel)}%`);
+  // Attitude indicator, bottom right, in a labelled panel.
+  const ax = w - 172, ay = h - 146, aw = 156, ah = 130;
+  panel(ctx, ax, ay, aw, ah);
+  ctx.fillStyle = '#8fb4cc';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('ATTITUDE', ax + aw / 2, ay + 15);
+  const hx = ax + aw / 2, hy = ay + 68, hr = 40;
   ctx.save();
   ctx.beginPath(); ctx.arc(hx, hy, hr, 0, Math.PI * 2); ctx.clip();
   ctx.translate(hx, hy);
   ctx.rotate(-f.roll);
-  ctx.translate(0, f.pitch * 120);
-  ctx.fillStyle = '#3f8fd2'; ctx.fillRect(-hr, -hr, hr * 2, hr);
-  ctx.fillStyle = '#8a6b46'; ctx.fillRect(-hr, 0, hr * 2, hr);
+  ctx.translate(0, f.pitch * 130);
+  ctx.fillStyle = '#3f8fd2'; ctx.fillRect(-hr - 4, -hr - 4, (hr + 4) * 2, hr + 4);
+  ctx.fillStyle = '#8a6b46'; ctx.fillRect(-hr - 4, 0, (hr + 4) * 2, hr + 4);
+  // Pitch ladder.
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 1;
+  for (const dy of [-22, -11, 11, 22]) {
+    ctx.beginPath();
+    ctx.moveTo(-18, dy); ctx.lineTo(18, dy); ctx.stroke();
+  }
   ctx.restore();
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2;
   ctx.beginPath(); ctx.arc(hx, hy, hr, 0, Math.PI * 2); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(hx - 30, hy); ctx.lineTo(hx + 30, hy); ctx.stroke();
-  // Throttle and fuel, bottom left.
-  bar(ctx, 18, h - 96, 170, 20, f.throttle, '#ff9d2e', 'THR');
-  bar(ctx, 18, h - 68, 170, 20, f.fuel / CFG.fuelMax, f.fuel < 25 ? '#e5484d' : '#4caf50', 'FUEL');
-  // Centre crosshair.
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-  ctx.lineWidth = 2;
+  // Fixed aircraft symbol and bank pointer.
+  ctx.strokeStyle = '#ffd34d'; ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.moveTo(w / 2 - 14, h * 0.42); ctx.lineTo(w / 2 + 14, h * 0.42);
-  ctx.moveTo(w / 2, h * 0.42 - 14); ctx.lineTo(w / 2, h * 0.42 + 14);
+  ctx.moveTo(hx - 26, hy); ctx.lineTo(hx - 8, hy);
+  ctx.moveTo(hx + 8, hy); ctx.lineTo(hx + 26, hy);
+  ctx.moveTo(hx, hy - 4); ctx.lineTo(hx, hy + 4);
   ctx.stroke();
-  // Flash message.
-  if (f.messageT > 0) {
-    ctx.fillStyle = '#ffd34d';
-    ctx.font = 'bold 30px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(f.message, w / 2, h * 0.3);
-  }
+  ctx.save();
+  ctx.translate(hx, hy);
+  ctx.rotate(-f.roll);
+  ctx.fillStyle = '#ffd34d';
+  ctx.beginPath();
+  ctx.moveTo(0, -hr - 2); ctx.lineTo(-5, -hr - 10); ctx.lineTo(5, -hr - 10);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#8fb4cc';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(`BANK ${Math.round(-f.roll * 180 / Math.PI)}°`, hx, ay + ah - 8);
   ctx.textAlign = 'left';
+  // Flight-path marker: circle with side ticks where the jet is heading.
+  const mx = w / 2, my = h * 0.42;
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(mx, my, 11, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(mx - 24, my); ctx.lineTo(mx - 13, my);
+  ctx.moveTo(mx + 13, my); ctx.lineTo(mx + 24, my);
+  ctx.moveTo(mx, my + 13); ctx.lineTo(mx, my + 20);
+  ctx.stroke();
+  // Flash message in a pill.
+  if (f.messageT > 0) {
+    ctx.font = 'bold 26px sans-serif';
+    const tw = ctx.measureText(f.message).width;
+    ctx.fillStyle = 'rgba(6,12,20,0.62)';
+    roundRect(ctx, w / 2 - tw / 2 - 18, h * 0.28 - 32, tw + 36, 44, 22);
+    ctx.fill();
+    ctx.fillStyle = '#ffd34d';
+    ctx.textAlign = 'center';
+    ctx.fillText(f.message, w / 2, h * 0.28);
+    ctx.textAlign = 'left';
+  }
 }
 
 function drawTitle(ctx, w, h) {
@@ -301,13 +616,18 @@ function drawTitle(ctx, w, h) {
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 64px sans-serif';
   ctx.fillText('SKYLINE RUN', w / 2, h * 0.3);
+  ctx.strokeStyle = '#ffd34d';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(w / 2 - 130, h * 0.3 + 18); ctx.lineTo(w / 2 + 130, h * 0.3 + 18);
+  ctx.stroke();
   ctx.font = '22px sans-serif';
   ctx.fillStyle = '#ffd34d';
-  ctx.fillText('Fly the ring course. Land on the runway. Mind the fuel.', w / 2, h * 0.3 + 44);
+  ctx.fillText('Fly the ring course. Land on the runway. Mind the fuel.', w / 2, h * 0.3 + 56);
   ctx.fillStyle = '#fff';
   ctx.font = '18px sans-serif';
-  ctx.fillText('W / S throttle   ·   Arrow keys steer   ·   Mouse steers too', w / 2, h * 0.3 + 96);
-  ctx.fillText('Click or press Enter to fly — R restarts, P pauses, M mutes', w / 2, h * 0.3 + 126);
+  ctx.fillText('W / S throttle   ·   Arrow keys steer   ·   Mouse steers too', w / 2, h * 0.3 + 108);
+  ctx.fillText('Click or press Enter to fly — R restarts, P pauses, M mutes', w / 2, h * 0.3 + 138);
   ctx.textAlign = 'left';
 }
 
@@ -334,7 +654,11 @@ export function render(ctx, f, scene, w, h) {
     z: f.z + Math.cos(f.heading) * 26,
     heading: f.heading, pitch: f.pitch * 0.6,
   };
-  drawSky(ctx, w, h, f.pitch, f.roll);
+  // Horizon line for the sky, ridges and haze band.
+  const far = project(cam.x + Math.sin(cam.heading) * 4000, cam.y, cam.z - Math.cos(cam.heading) * 4000, cam, w, h);
+  const horizonY = far ? far.y : h * 0.42;
+  drawSky(ctx, w, h, f.pitch, f.roll, horizonY);
+  drawRidges(ctx, cam, w, h, horizonY);
   drawTerrain(ctx, cam, w, h);
   drawRunway(ctx, cam, w, h);
   // Rings, nearest first so the next one draws on top.
@@ -343,8 +667,12 @@ export function render(ctx, f, scene, w, h) {
     const db = (b.r[0] - f.x) ** 2 + (b.r[2] - f.z) ** 2;
     return da - db;
   });
-  for (const { r, i } of order) drawRing(ctx, r, cam, w, h, i === f.ringIndex, scene !== 'title');
-  drawJet(ctx, w, h, f.roll, f.speed);
+  for (const { r, i } of order) {
+    const dx = r[0] - f.x, dy = r[1] - f.y, dz = r[2] - f.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    drawRing(ctx, r, cam, w, h, i === f.ringIndex, scene !== 'title', dist, i);
+  }
+  drawJet(ctx, w, h, f.roll, f.speed, f.time);
   drawHUD(ctx, f, w, h);
   if (scene === 'title') drawTitle(ctx, w, h);
   if (f.crashed) drawEnd(ctx, f, w, h, 'CRASHED', f.crashReason);

@@ -49,23 +49,39 @@ export function terrainHeight(x, z) {
   return h;
 }
 
-// Patchwork fields: a cheap hash so neighbouring field squares differ.
+// Patchwork fields: two cheap hashes so neighbouring field squares differ
+// in both crop type and brightness.
+function hash2(x, z, a, b) {
+  const n = Math.sin(x * a + z * b) * 43758.5453;
+  return n - Math.floor(n);
+}
+
 function fieldShade(x, z) {
-  const fx = Math.floor(x / 130), fz = Math.floor(z / 130);
-  const n = Math.sin(fx * 127.1 + fz * 311.7) * 43758.5453;
-  return (n - Math.floor(n)) * 0.5;
+  const fx = Math.floor(x / 90), fz = Math.floor(z / 90);
+  return hash2(fx, fz, 127.1, 311.7);
+}
+
+// Sun dappling: slow brightness variation across the ground, so the
+// terrain reads as lit hillsides and soft shadow rather than flat colour.
+export function dapple(x, z) {
+  return 0.90 + hash2(Math.floor(x / 260), Math.floor(z / 260), 71.3, 193.7) * 0.16;
 }
 
 export function terrainColor(x, z, h) {
-  if (h < -2) return '#2e6da8';                    // sea
-  if (h < 1.5) return '#d9c48a';                   // beach
-  if (h > 95) return '#e8eef2';                    // snow
-  if (h > 62) return '#7d7468';                    // rock
-  if (h > 34) return '#4d7a3d';                    // forest
-  const s = fieldShade(x, z);                      // farmland patches
-  if (s < 0.16) return '#8fae4e';
-  if (s < 0.32) return '#a8b45a';
-  return '#6f9e46';
+  const s = fieldShade(x, z);
+  const s2 = hash2(Math.floor(x / 90), Math.floor(z / 90), 269.5, 183.3);
+  if (h < -2) return s2 < 0.5 ? '#2e6da8' : '#357ab6';   // sea
+  if (h < 1.5) return '#d9c48a';                        // beach
+  if (h > 95) return s2 < 0.5 ? '#eef2f5' : '#dfe9f0';   // snow
+  if (h > 62) return s2 < 0.5 ? '#7d7468' : '#8d8578';   // rock
+  if (h > 34) return s2 < 0.5 ? '#4d7a3d' : '#3f6b31';   // forest
+  // Farmland: wheat, meadow, ploughed earth and dark crop, by patch.
+  if (s < 0.14) return '#c2a95e';
+  if (s < 0.30) return '#8fae4e';
+  if (s < 0.46) return '#9a7b4a';
+  if (s < 0.62) return '#6f9e46';
+  if (s < 0.80) return '#5d8f3e';
+  return '#a8b45a';
 }
 
 export function groundAt(x, z) { return terrainHeight(x, z); }
